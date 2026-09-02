@@ -325,9 +325,14 @@ class GridMotionNode(Node):
                 rclpy.spin_once(self, timeout_sec=0.01)
                 x, y, _ = self.pose()
                 dist = math.hypot(hx - x, hy - y)
-                if dist <= a.position_tol:
+                if dist <= a.return_position_tol:
                     break
                 self.turn(math.atan2(hy - y, hx - x), max_speed=a.turn_speed)
+                rclpy.spin_once(self, timeout_sec=0.01)
+                x, y, _ = self.pose()
+                dist = math.hypot(hx - x, hy - y)
+                if dist <= a.return_position_tol:
+                    break
                 self.drive(dist, max_speed=a.max_speed)
         self.get_logger().info('restoring original orientation')
         self.turn(hyaw, max_speed=a.turn_speed)
@@ -404,6 +409,7 @@ def parse_args():
     p.add_argument('--turn-speed', type=float, default=0.25)
     p.add_argument('--corr-gain', type=float, default=1.5)
     p.add_argument('--position-tol', type=float, default=0.01)
+    p.add_argument('--return-position-tol', type=float, default=0.025)
     p.add_argument('--angle-tol', type=float, default=0.025)
     p.add_argument('--rate', type=float, default=25.0)
     p.add_argument('--settle-delay', type=float, default=0.3)
