@@ -64,6 +64,21 @@ def ask_grid_size(default_n):
         return n
 
 
+def ask_total_size():
+    if not sys.stdin.isatty():
+        return None
+    raw = input('square size in meters or blank to set cell size directly: ').strip()
+    if raw == '':
+        return None
+    try:
+        size = float(raw)
+    except ValueError:
+        return None
+    if size <= 0:
+        return None
+    return size
+
+
 class GridMotionNode(Node):
     def __init__(self, args):
         super().__init__('grid_motion_node')
@@ -251,7 +266,7 @@ class GridMotionNode(Node):
         self.reset_odom()
         self.wait_for_odom()
         self.stop(0.3)
-        
+
         self.home = self.pose()
         hx, hy, hyaw = self.home
         print(f'home pose: x={hx:.3f} y={hy:.3f} yaw={math.degrees(hyaw):.1f}deg')
@@ -271,6 +286,7 @@ def parse_args():
     p.add_argument('--grid-size', type=int, default=None)
     p.add_argument('--no-prompt', action='store_true')
     p.add_argument('--cell-size', type=float, default=None)
+    p.add_argument('--total-size', type=float, default=None)
     p.add_argument('--max-speed', type=float, default=0.05)
     p.add_argument('--turn-speed', type=float, default=0.25)
     p.add_argument('--corr-gain', type=float, default=1.5)
@@ -288,7 +304,13 @@ def parse_args():
     if args.grid_size is None:
         args.grid_size = 4 if args.no_prompt else ask_grid_size(4)
 
-    if args.cell_size is None:
+    if args.total_size is None and args.cell_size is None and not args.no_prompt and args.grid_size >= 2:
+        args.total_size = ask_total_size()
+    if args.total_size is not None and args.cell_size is not None:
+        p.error('use either --cell-size or --total-size not both')
+    if args.total_size is not None:
+        args.cell_size = args.total_size / max(args.grid_size - 1, 1)
+    elif args.cell_size is None:
         args.cell_size = 0.25
 
     return args
