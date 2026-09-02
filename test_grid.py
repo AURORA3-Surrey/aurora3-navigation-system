@@ -29,6 +29,14 @@ def clamp(v, low, high):
     return max(low, min(high, v))
 
 
+def world_to_body(vx_world, vy_world, yaw):
+    # rotate world velocity into robot body frame (omni only)
+    c, s = math.cos(yaw), math.sin(yaw)
+    vx_body = vx_world * c + vy_world * s
+    vy_body = -vx_world * s + vy_world * c
+    return vx_body, vy_body
+
+
 def position_factor(tau):
     tau = clamp(tau, 0.0, 1.0)
     return 35 * tau**4 - 84 * tau**5 + 70 * tau**6 - 20 * tau**7
@@ -87,6 +95,10 @@ class GridMotionNode(Node):
         self.have_odom = False
         self.home = None
 
+        # slew rate limiter
+        self.last_vx = self.last_vy = self.last_wz = 0.0
+        self.last_send_time = None
+
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
         self.pub = self.create_publisher(TwistStamped, args.cmd_vel_topic, qos)
         self.create_subscription(Odometry, '/odom', self.odom_cb, qos)
@@ -104,32 +116,43 @@ class GridMotionNode(Node):
 
     def enable_motors(self):
         if not self.motor_client.wait_for_service(timeout_sec=3.0):
-            print('motor power service not found, skipping')
+            self.get_logger().warn('motor power service not found, skipping')
             return
         req = SetBool.Request()
         req.data = True
         future = self.motor_client.call_async(req)
         rclpy.spin_until_future_complete(self, future)
-        print('motor power enable result:', future.result())
+        self.get_logger().info(f'motor power enable result: {future.result()}')
 
     def reset_odom(self):
         if not self.reset_client.wait_for_service(timeout_sec=2.0):
-            print('reset odom not found')
+            self.get_logger().warn('reset odom not found')
             return
         future = self.reset_client.call_async(Trigger.Request())
         rclpy.spin_until_future_complete(self, future)
-        print('reset odom result:', future.result())
+        self.get_logger().info(f'reset odom result: {future.result()}')
 
     def wait_for_odom(self, timeout=10.0):
-        print('waiting for /odom')
+        self.get_logger().info('waiting for /odom')
         start = time.monotonic()
         while rclpy.ok() and not self.have_odom:
             rclpy.spin_once(self, timeout_sec=0.1)
             if time.monotonic() - start > timeout:
                 raise RuntimeError('no odom data')
-        print('got /odom')
+        self.get_logger().info('got /odom')
 
     def send(self, vx=0.0, vy=0.0, wz=0.0):
+        # every command rate-limit relative to last
+        now = time.monotonic()
+        dt = (now - self.last_send_time) if self.last_send_time else 1.0 / self.a.rate
+        self.last_send_time = now
+        max_dv = self.a.max_accel * dt
+        max_dw = self.a.max_ang_accel * dt
+        vx = clamp(vx, self.last_vx - max_dv, self.last_vx + max_dv)
+        vy = clamp(vy, self.last_vy - max_dv, self.last_vy + max_dv)
+        wz = clamp(wz, self.last_wz - max_dw, self.last_wz + max_dw)
+        self.last_vx, self.last_vy, self.last_wz = vx, vy, wz
+
         msg = TwistStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.twist.linear.x = float(vx)
@@ -145,6 +168,8 @@ class GridMotionNode(Node):
             rclpy.spin_once(self, timeout_sec=0.02)
             time.sleep(0.05)
 
+    # rotation (shared by omni and diff)
+
     def turn(self, target_yaw, max_speed=None):
         a = self.a
         max_speed = a.turn_speed if max_speed is None else max_speed
@@ -155,7 +180,7 @@ class GridMotionNode(Node):
             return
 
         direction = 'left' if angle > 0 else 'right'
-        print(f'turning {direction} {math.degrees(abs(angle)):.1f} deg over {T:.2f}s')
+        self.get_logger().info(f'turning {direction} {math.degrees(abs(angle)):.1f} deg over {T:.2f}s')
 
         move_start = time.monotonic()
         while rclpy.ok():
@@ -172,22 +197,26 @@ class GridMotionNode(Node):
             self.send(wz=w_ff + w_correction)
             time.sleep(1.0 / a.rate)
         self.stop(0.05)
+        self.finish_turn(target_yaw, max_speed)
+        self.stop()
 
-        # small correction
+    def finish_turn(self, target_yaw, max_speed):
+        a = self.a
         deadline = time.monotonic() + 2.0
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(self, timeout_sec=0.0)
             _, _, yaw = self.pose()
             error = normalize(target_yaw - yaw)
             if abs(error) <= a.angle_tol:
-                break
+                return
             self.send(wz=math.copysign(clamp(1.25 * abs(error), 0.0, max_speed), error))
             time.sleep(1.0 / a.rate)
-        self.stop()
 
     def turn_by(self, angle, max_speed=None):
         _, _, yaw = self.pose()
         self.turn(normalize(yaw + angle), max_speed)
+
+    # diff translation (forward no rotation)
 
     def drive(self, distance, max_speed=None):
         if distance <= 0:
@@ -198,7 +227,7 @@ class GridMotionNode(Node):
         if T <= 0:
             return
 
-        print(f'driving forward {distance:.3f}m over {T:.2f}s')
+        self.get_logger().info(f'driving forward {distance:.3f}m over {T:.2f}s')
         start_x, start_y, start_yaw = self.pose()
         move_start = time.monotonic()
         while rclpy.ok():
@@ -217,42 +246,98 @@ class GridMotionNode(Node):
             self.send(vx=v_ff + v_correction, wz=heading_fix)
             time.sleep(1.0 / a.rate)
         self.stop(0.05)
+        self.finish_drive(distance, start_x, start_y, start_yaw, max_speed)
+        self.stop()
 
+    def finish_drive(self, distance, start_x, start_y, start_yaw, max_speed):
+        a = self.a
         deadline = time.monotonic() + 2.0
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(self, timeout_sec=0.0)
             x, y, yaw = self.pose()
             remaining = distance - math.hypot(x - start_x, y - start_y)
             if remaining <= a.position_tol:
-                break
+                return
             heading_fix = clamp(1.8 * normalize(start_yaw - yaw), -0.5 * a.turn_speed, 0.5 * a.turn_speed)
             self.send(vx=clamp(remaining, 0.0, max_speed), wz=heading_fix)
             time.sleep(1.0 / a.rate)
+
+    # omni translation (never rotates during the move)
+
+    def move_to(self, target_x, target_y, max_speed=None):
+        a = self.a
+        max_speed = a.max_speed if max_speed is None else max_speed
+        start_x, start_y, start_yaw = self.pose()
+        dx = target_x - start_x
+        dy = target_y - start_y
+        T = max(duration_for_peak(dx, max_speed), duration_for_peak(dy, max_speed))
+        if T <= 0:
+            return
+
+        self.get_logger().info(f'omni move dx={dx:.3f} dy={dy:.3f} over {T:.2f}s')
+        move_start = time.monotonic()
+        while rclpy.ok():
+            elapsed = time.monotonic() - move_start
+            if elapsed >= T:
+                break
+            tau = elapsed / T
+            vf, pf = velocity_factor(tau), position_factor(tau)
+            rclpy.spin_once(self, timeout_sec=0.0)
+            x, y, yaw = self.pose()
+            expected_x, expected_y = start_x + dx * pf, start_y + dy * pf
+            vx_corr = clamp(a.corr_gain * (expected_x - x), -0.3 * max_speed, 0.3 * max_speed)
+            vy_corr = clamp(a.corr_gain * (expected_y - y), -0.3 * max_speed, 0.3 * max_speed)
+            vx_world = (dx / T) * vf + vx_corr
+            vy_world = (dy / T) * vf + vy_corr
+            vx_body, vy_body = world_to_body(vx_world, vy_world, yaw)
+            heading_fix = clamp(1.8 * normalize(start_yaw - yaw), -0.5 * a.turn_speed, 0.5 * a.turn_speed)
+            self.send(vx=vx_body, vy=vy_body, wz=heading_fix)
+            time.sleep(1.0 / a.rate)
+        self.stop(0.05)
+        self.finish_move(target_x, target_y, start_yaw, max_speed)
         self.stop()
+
+    def finish_move(self, target_x, target_y, start_yaw, max_speed):
+        a = self.a
+        deadline = time.monotonic() + 2.0
+        while rclpy.ok() and time.monotonic() < deadline:
+            rclpy.spin_once(self, timeout_sec=0.0)
+            x, y, yaw = self.pose()
+            dx, dy = target_x - x, target_y - y
+            if math.hypot(dx, dy) <= a.position_tol:
+                return
+            vx_world = clamp(dx, -max_speed, max_speed)
+            vy_world = clamp(dy, -max_speed, max_speed)
+            vx_body, vy_body = world_to_body(vx_world, vy_world, yaw)
+            heading_fix = clamp(1.8 * normalize(start_yaw - yaw), -0.5 * a.turn_speed, 0.5 * a.turn_speed)
+            self.send(vx=vx_body, vy=vy_body, wz=heading_fix)
+            time.sleep(1.0 / a.rate)
+
+    # return to start point
 
     def go_home(self):
         hx, hy, hyaw = self.home
         a = self.a
-        while rclpy.ok():
-            rclpy.spin_once(self, timeout_sec=0.01)
-            x, y, _ = self.pose()
-            dist = math.hypot(hx - x, hy - y)
-            if dist <= a.position_tol:
-                break
-            self.turn(math.atan2(hy - y, hx - x), max_speed=a.turn_speed)
-            self.drive(dist, max_speed=a.max_speed)
-        print('restoring original orientation')
+        if a.platform == 'omni':
+            self.move_to(hx, hy, max_speed=a.max_speed)
+        else:
+            while rclpy.ok():
+                rclpy.spin_once(self, timeout_sec=0.01)
+                x, y, _ = self.pose()
+                dist = math.hypot(hx - x, hy - y)
+                if dist <= a.position_tol:
+                    break
+                self.turn(math.atan2(hy - y, hx - x), max_speed=a.turn_speed)
+                self.drive(dist, max_speed=a.max_speed)
+        self.get_logger().info('restoring original orientation')
         self.turn(hyaw, max_speed=a.turn_speed)
 
-    def drive_grid(self):
+
+    def drive_grid_diff(self):
         n = self.a.grid_size
         cell = self.a.cell_size
-        print(f'starting {n}x{n} grid, cell size {cell:.3f} m')
-        if n <= 1:
-            print('grid size 1')
-            return
         for row in range(n):
-            print(f'row {row + 1}/{n}')
+            self.get_logger().info(f'row {row + 1}/{n}')
             for _ in range(n - 1):
                 self.drive(cell)
             if row < n - 1:
@@ -260,6 +345,33 @@ class GridMotionNode(Node):
                 self.turn_by(turn)
                 self.drive(cell)
                 self.turn_by(turn)
+
+    def drive_grid_omni(self):
+        # no turns (straight to every point, boustrophedon order)
+        n = self.a.grid_size
+        cell = self.a.cell_size
+        hx, hy, _ = self.home
+        waypoints = []
+        for row in range(n):
+            wy = hy + row * cell
+            cols = range(n) if row % 2 == 0 else reversed(range(n))
+            for col in cols:
+                waypoints.append((hx + col * cell, wy))
+        for i, (wx, wy) in enumerate(waypoints[1:], start=1):
+            self.get_logger().info(f'waypoint {i}/{len(waypoints) - 1}: ({wx:.2f}, {wy:.2f})')
+            self.move_to(wx, wy)
+
+    def drive_grid(self):
+        n = self.a.grid_size
+        cell = self.a.cell_size
+        self.get_logger().info(f'starting {n}x{n} grid ({self.a.platform}), cell size {cell:.3f} m')
+        if n <= 1:
+            self.get_logger().info('grid size 1')
+            return
+        if self.a.platform == 'omni':
+            self.drive_grid_omni()
+        else:
+            self.drive_grid_diff()
 
     def run(self):
         self.enable_motors()
@@ -269,20 +381,21 @@ class GridMotionNode(Node):
 
         self.home = self.pose()
         hx, hy, hyaw = self.home
-        print(f'home pose: x={hx:.3f} y={hy:.3f} yaw={math.degrees(hyaw):.1f}deg')
+        self.get_logger().info(f'home pose: x={hx:.3f} y={hy:.3f} yaw={math.degrees(hyaw):.1f}deg')
 
         self.drive_grid()
 
         if not self.a.no_return_home:
-            print('going back to start')
+            self.get_logger().info('going back to start')
             self.go_home()
 
         self.stop(0.8)
-        print('grid complete')
+        self.get_logger().info('grid complete')
 
 
 def parse_args():
     p = argparse.ArgumentParser()
+    p.add_argument('--platform', choices=['diff', 'omni'], default='diff')
     p.add_argument('--grid-size', type=int, default=None)
     p.add_argument('--no-prompt', action='store_true')
     p.add_argument('--cell-size', type=float, default=None)
@@ -294,6 +407,8 @@ def parse_args():
     p.add_argument('--angle-tol', type=float, default=0.025)
     p.add_argument('--rate', type=float, default=25.0)
     p.add_argument('--settle-delay', type=float, default=0.3)
+    p.add_argument('--max-accel', type=float, default=0.1)
+    p.add_argument('--max-ang-accel', type=float, default=0.5)
     p.add_argument('--no-return-home', action='store_true')
     p.add_argument('--cmd-vel-topic', default='/cmd_vel')
     p.add_argument('--motor-power-service', default='/motor_power')
@@ -323,10 +438,10 @@ def main():
     try:
         node.run()
     except KeyboardInterrupt:
-        print('stopping robot')
+        node.get_logger().warn('stopping robot')
         node.stop(1.0)
     except Exception as exc:
-        print('error:', exc)
+        node.get_logger().error(f'error: {exc}')
         node.stop(1.0)
         raise
     finally:
