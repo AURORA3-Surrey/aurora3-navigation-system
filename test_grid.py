@@ -8,8 +8,10 @@ from std_srvs.srv import SetBool, Trigger
 
 GRID_SIZE = 4       # m
 CELL_SIZE = 0.3     # m
-SPEED = 0.05        # m/s
+MAX_SPEED = 0.05    # m/s
+MIN_SPEED = 0.018   # m/s
 TURN_SPEED = 0.3    # rad/s
+RAMP_DIST = 0.06    # m
 POSITION_TOL = 0.01 # m
 ANGLE_TOL = 0.02    # rad
 
@@ -26,6 +28,15 @@ def normalize(angle):
     while angle < -math.pi:
         angle += 2 * math.pi
     return angle
+
+
+def clamp(v, low, high):
+    return max(low, min(high, v))
+
+
+def smooth(t):
+    t = clamp(t, 0.0, 1.0)
+    return t * t * (3 - 2 * t)
 
 
 class GridMotionNode(Node):
@@ -71,14 +82,23 @@ class GridMotionNode(Node):
         self.send(0.0, 0.0)
         time.sleep(0.2)
 
+    def ramped_speed(self, travelled, remaining):
+        factor = min(smooth(travelled / RAMP_DIST), smooth(remaining / RAMP_DIST))
+        if factor <= 0.0:
+            return 0.0
+        return max(MIN_SPEED, MAX_SPEED * factor)
+
     def drive_forward(self, distance):
-        start_x, start_y = self.x, self.y
+        start_x, start_y, start_yaw = self.x, self.y, self.yaw
         while rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.05)
             travelled = math.hypot(self.x - start_x, self.y - start_y)
-            if distance - travelled <= POSITION_TOL:
+            remaining = distance - travelled
+            if remaining <= POSITION_TOL:
                 break
-            self.send(SPEED, 0.0)
+            heading_error = normalize(start_yaw - self.yaw)
+            angular = clamp(1.8 * heading_error, -0.5 * TURN_SPEED, 0.5 * TURN_SPEED)
+            self.send(self.ramped_speed(travelled, remaining), angular)
         self.stop()
 
     def turn(self, angle):
