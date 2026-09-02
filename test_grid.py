@@ -6,7 +6,8 @@ from geometry_msgs.msg import TwistStamped
 from nav_msgs.msg import Odometry
 from std_srvs.srv import SetBool, Trigger
 
-SIDE_LENGTH = 0.3   # m
+GRID_SIZE = 4       # m
+CELL_SIZE = 0.3     # m
 SPEED = 0.05        # m/s
 TURN_SPEED = 0.3    # rad/s
 POSITION_TOL = 0.01 # m
@@ -27,9 +28,9 @@ def normalize(angle):
     return angle
 
 
-class SquareMotionNode(Node):
+class GridMotionNode(Node):
     def __init__(self):
-        super().__init__('square_motion_node')
+        super().__init__('grid_motion_node')
         self.pub = self.create_publisher(TwistStamped, '/cmd_vel', 10)
         self.motor_client = self.create_client(SetBool, '/motor_power')
         self.reset_client = self.create_client(Trigger, '/reset_odometry')
@@ -94,14 +95,21 @@ class SquareMotionNode(Node):
         self.enable_motors()
         self.reset_odom()
         self.wait_for_odom()
-        for _ in range(4):
-            self.drive_forward(SIDE_LENGTH)
-            self.turn(math.pi / 2)
+        for row in range(GRID_SIZE):
+            for _ in range(GRID_SIZE - 1):
+                self.drive_forward(CELL_SIZE)
+            if row == GRID_SIZE - 1:
+                break
+            # end of row (turn move up row and turn again)
+            turn = -math.pi / 2 if row % 2 == 0 else math.pi / 2
+            self.turn(turn)
+            self.drive_forward(CELL_SIZE)
+            self.turn(turn)
 
 
 def main():
     rclpy.init()
-    node = SquareMotionNode()
+    node = GridMotionNode()
     node.run()
     node.destroy_node()
     rclpy.shutdown()
