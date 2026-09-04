@@ -264,9 +264,9 @@ class GridMotionNode(Node):
                 raw_angle -= 2 * math.pi
             angle = raw_angle if spin else normalize(raw_angle)
 
-            if not cmd.get('_logged'):
-                cmd['_logged'] = True
-                self.get_logger().info(f"turn cmd {math.degrees(angle):+.1f} deg")
+            if not cmd.get('logged'):
+                cmd['logged'] = True
+                self.get_logger().info(f"turn cmd {math.degrees(angle):+.1f} deg (start yaw {math.degrees(start_yaw):+.1f})")
 
             T = duration_for_peak(angle, a.turn_speed)
             if T <= 0:
@@ -401,6 +401,25 @@ def initialize_robot(node):
     if node.reset_client.wait_for_service(timeout_sec=2.0):
         future = node.reset_client.call_async(Trigger.Request())
         rclpy.spin_until_future_complete(node, future)
+
+        deadline = node.get_time_sec() + 2.0
+        settled = False
+        while rclpy.ok() and node.get_time_sec() < deadline:
+            rclpy.spin_once(node, timeout_sec=0.05)
+            if math.hypot(node.x, node.y) < 0.01 and abs(node.yaw) < 0.02:
+                settled = True
+                break
+        if not settled:
+            node.get_logger().warn(
+                f'odometry not zero after reset: ({node.x:.3f}, {node.y:.3f}, '
+                f'{math.degrees(node.yaw):+.2f} deg) — home may be wrong')
+    else:
+        node.get_logger().warn('reset odom service not found')
+
+    node.home = node.pose()
+    node.intended_yaw = node.home[2]
+    node.get_logger().info(f'home: x={node.home[0]:.3f} y={node.home[1]:.3f} '
+                           f'yaw={math.degrees(node.home[2]):+.2f} deg')
     
     node.home = node.pose()
     node.intended_yaw = node.home[2]
