@@ -1,6 +1,5 @@
 import argparse
 import math
-import sys
 import time
 import rclpy
 from rclpy.node import Node
@@ -75,6 +74,8 @@ class GridMotionNode(Node):
         self.corr_state = {}
         self.corr_filtered = {}
         self.odom_seq = 0
+        self.odom_v = 0.0
+        self.odom_wz = 0.0
         self.is_finished = False
 
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
@@ -92,6 +93,8 @@ class GridMotionNode(Node):
         self.x = msg.pose.pose.position.x
         self.y = msg.pose.pose.position.y
         self.yaw = yaw_from_quaternion(msg.pose.pose.orientation)
+        self.odom_v = math.hypot(msg.twist.twist.linear.x, msg.twist.twist.linear.y)
+        self.odom_wz = msg.twist.twist.angular.z
         self.have_odom = True
         self.odom_seq += 1
 
@@ -120,12 +123,12 @@ class GridMotionNode(Node):
         self.corr_state.clear()
         self.corr_filtered.clear()
 
-    def tracking_correction(self, axis, error, direction_sign, gain, damping_gain, max_speed, tol, homing=False):
+    def tracking_correction(self, axis, error, gain, damping_gain, max_speed, tol):
         now = self.get_time_sec()
         seq = self.odom_seq
         prev = self.corr_state.get(axis)
         d_error = 0.0
-        
+
         if prev is None:
             self.corr_state[axis] = (error, now, seq)
         else:
@@ -141,15 +144,7 @@ class GridMotionNode(Node):
             raw_target = 0.0
         else:
             raw_target = gain * error + damping_gain * d_error
-            if homing:
-                lo, hi = -0.3 * max_speed, 0.3 * max_speed
-            elif direction_sign > 0:
-                lo, hi = -0.05 * max_speed, 0.3 * max_speed
-            elif direction_sign < 0:
-                lo, hi = -0.3 * max_speed, 0.05 * max_speed
-            else:
-                lo, hi = -0.05 * max_speed, 0.05 * max_speed
-            raw_target = clamp(raw_target, lo, hi)
+            raw_target = clamp(raw_target, -max_speed, max_speed)
 
         prev_filt = self.corr_filtered.get(axis)
         if prev_filt is None or self.a.corr_filter_tau <= 0:
@@ -159,7 +154,7 @@ class GridMotionNode(Node):
             dt_f = now - prev_t
             alpha = clamp(dt_f / (self.a.corr_filter_tau + dt_f), 0.0, 1.0)
             filtered = prev_val + (raw_target - prev_val) * alpha
-            
+
         self.corr_filtered[axis] = (filtered, now)
         return filtered
 
@@ -175,7 +170,8 @@ class GridMotionNode(Node):
         if self.intended_yaw is None:
             _, _, self.intended_yaw = self.pose()
         self.intended_yaw = normalize(self.intended_yaw + angle)
-        self.plan_turn(self.intended_yaw)
+        self.plan.append({'type': 'turn', 'target_yaw': self.intended_yaw,
+                        'spin': 1.0 if angle >= 0 else -1.0})
 
     def plan_drive(self, distance):
         self.plan.append({'type': 'drive', 'distance': distance})
@@ -260,7 +256,18 @@ class GridMotionNode(Node):
                 self.current_cmd = None
 
         elif ctype == 'turn':
-            angle = normalize(cmd['target_yaw'] - start_yaw)
+            raw_angle = cmd['target_yaw'] - start_yaw
+            spin = cmd.get('spin', 0.0)
+            if spin > 0 and raw_angle < 0:
+                raw_angle += 2 * math.pi
+            elif spin < 0 and raw_angle > 0:
+                raw_angle -= 2 * math.pi
+            angle = raw_angle if spin else normalize(raw_angle)
+
+            if not cmd.get('_logged'):
+                cmd['_logged'] = True
+                self.get_logger().info(f"turn cmd {math.degrees(angle):+.1f} deg")
+
             T = duration_for_peak(angle, a.turn_speed)
             if T <= 0:
                 self.current_cmd = None
@@ -269,22 +276,27 @@ class GridMotionNode(Node):
             homing = elapsed >= T
             tau = min(elapsed / T, 1.0)
             w_ff = 0.0 if homing else (angle / T) * velocity_factor(tau)
-            
+
             turned = normalize(yaw - start_yaw)
+            if abs(angle) > math.pi:
+                if spin > 0 and turned < 0:
+                    turned += 2 * math.pi
+                elif spin < 0 and turned > 0:
+                    turned -= 2 * math.pi
+
             expected = angle * position_factor(tau)
-            error = expected - turned
-            direction_sign = 1 if angle > 0 else -1
-            
-            w_correction = self.tracking_correction('turn', error, direction_sign, a.corr_gain, a.corr_damping_gain,
-                                                     a.turn_speed, a.angle_tol, homing=homing)
+            error = expected - turned if abs(angle) > math.pi else normalize(expected - turned)
+
+            w_correction = self.tracking_correction('turn', error, a.corr_gain, a.corr_damping_gain,
+                                                    a.turn_speed, a.angle_tol)
             self.send(wz=w_ff + w_correction)
 
-            if homing and abs(error) <= a.angle_tol:
-                self.last_wz = 0.0
+            if homing and abs(error) <= a.angle_tol and abs(self.odom_wz) < 0.05:
+                self.get_logger().info(f"landed {math.degrees(normalize(cmd['target_yaw'] - yaw)):+.2f} deg off")
+                self.send(0.0, 0.0, 0.0)
                 self.current_cmd = None
-            elif elapsed >= T + a.homing_timeout:
-                self.get_logger().warn(f'turn timed out, residual error {math.degrees(error):.2f} deg')
-                self.last_wz = 0.0
+            elif homing and elapsed >= T + a.homing_timeout:
+                self.get_logger().warn(f'turn residual {math.degrees(error):.2f} deg at timeout')
                 self.current_cmd = None
 
         elif ctype == 'drive':
@@ -306,19 +318,17 @@ class GridMotionNode(Node):
             expected = dist * position_factor(tau)
             error = expected - travelled
 
-            v_correction = self.tracking_correction('drive', error, 1, a.corr_gain, a.corr_damping_gain
-                                                    , a.max_speed, a.position_tol, homing=homing)
-            lateral_correction = self.tracking_correction('drive_lat', -lateral, 0, a.corr_gain, a.corr_damping_gain,
-                                                           a.turn_speed, a.position_tol, homing=homing)
-            heading_fix = clamp(1.8 * normalize(start_yaw - yaw) + lateral_correction, -0.5 * a.turn_speed, 0.5 * a.turn_speed)
+            v_correction = self.tracking_correction('drive', error, a.corr_gain, a.corr_damping_gain,
+                                                    a.max_speed, a.position_tol)
+            heading_fix = clamp(1.8 * normalize(start_yaw - yaw - clamp(2.0 * lateral, -0.35, 0.35)),
+                                -0.5 * a.turn_speed, 0.5 * a.turn_speed)
             self.send(vx=v_ff + v_correction, wz=heading_fix)
 
-            if homing and abs(error) <= a.position_tol:
-                self.last_vx = 0.0
+            if homing and abs(error) <= a.position_tol and abs(self.odom_v) < 0.02:
+                self.send(0.0, 0.0, 0.0)
                 self.current_cmd = None
             elif elapsed >= T + a.homing_timeout:
-                self.get_logger().warn(f'drive timed out, residual error {error:.3f}m')
-                self.last_vx = 0.0
+                self.get_logger().warn(f'drive residual {error:.3f}m at timeout')
                 self.current_cmd = None
 
         elif ctype == 'move_to':
@@ -337,10 +347,10 @@ class GridMotionNode(Node):
             expected_x, expected_y = start_x + dx * pf, start_y + dy * pf
             err_x, err_y = expected_x - x, expected_y - y
             
-            vx_corr = self.tracking_correction('move_x', err_x, 1 if dx > 0 else (-1 if dx < 0 else 0), a.corr_gain,
-                                                a.corr_damping_gain, a.max_speed, a.position_tol, homing=homing)
-            vy_corr = self.tracking_correction('move_y', err_y, 1 if dy > 0 else (-1 if dy < 0 else 0), a.corr_gain,
-                                                a.corr_damping_gain, a.max_speed, a.position_tol, homing=homing)
+            vx_corr = self.tracking_correction('move_x', err_x, a.corr_gain, a.corr_damping_gain,
+                                               a.max_speed, a.position_tol)
+            vy_corr = self.tracking_correction('move_y', err_y, a.corr_gain, a.corr_damping_gain,
+                                               a.max_speed, a.position_tol)
             
             vx_world = (dx / T) * vf + vx_corr
             vy_world = (dy / T) * vf + vy_corr
@@ -349,12 +359,11 @@ class GridMotionNode(Node):
             
             self.send(vx=vx_body, vy=vy_body, wz=heading_fix)
 
-            if homing and math.hypot(err_x, err_y) <= a.position_tol:
-                self.last_vx = self.last_vy = 0.0
+            if homing and math.hypot(err_x, err_y) <= a.position_tol and abs(self.odom_v) < 0.02:
+                self.send(0.0, 0.0, 0.0)
                 self.current_cmd = None
             elif elapsed >= T + a.homing_timeout:
-                self.get_logger().warn(f'move_to timed out, residual error {math.hypot(err_x, err_y):.3f}m')
-                self.last_vx = self.last_vy = 0.0
+                self.get_logger().warn(f'move_to residual {math.hypot(err_x, err_y):.3f}m at timeout')
                 self.current_cmd = None
                 
         elif ctype == 'return_home_diff':
@@ -402,11 +411,11 @@ def parse_args():
     p.add_argument('--platform', choices=['diff', 'omni'], default='diff')
     p.add_argument('--grid-size', type=int, default=4)
     p.add_argument('--cell-size', type=float, default=0.25)
-    p.add_argument('--max-speed', type=float, default=0.15)
+    p.add_argument('--max-speed', type=float, default=0.1)
     p.add_argument('--turn-speed', type=float, default=0.25)
     p.add_argument('--corr-gain', type=float, default=1.5)
     p.add_argument('--corr-damping-gain', type=float, default=0.3)
-    p.add_argument('--corr-filter-tau', type=float, default=0.15)
+    p.add_argument('--corr-filter-tau', type=float, default=0.08)
     p.add_argument('--position-tol', type=float, default=0.01)
     p.add_argument('--return-position-tol', type=float, default=0.025)
     p.add_argument('--angle-tol', type=float, default=0.025)
@@ -419,7 +428,7 @@ def parse_args():
     p.add_argument('--cmd-vel-topic', default='/cmd_vel')
     p.add_argument('--motor-power-service', default='/motor_power')
     p.add_argument('--reset-odom-service', default='/reset_odometry')
-    p.add_argument('--corr-max-d-error', type=float, default=2.0)
+    p.add_argument('--corr-max-d-error', type=float, default=1.0)
     return p.parse_args()
 
 
