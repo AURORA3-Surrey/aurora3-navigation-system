@@ -330,6 +330,10 @@ class GridMotionNode(Node):
                 self.current_cmd = None
                 return
 
+            if not cmd.get('logged'):
+                cmd['logged'] = True
+                self.get_logger().info(f"drive cmd {dist:+.3f}m (start yaw {math.degrees(start_yaw):+.1f})")
+
             homing = elapsed >= T
             tau = min(elapsed / T, 1.0)
             v_ff = 0.0 if homing else (dist / T) * velocity_factor(tau)
@@ -351,6 +355,7 @@ class GridMotionNode(Node):
             self.send(vx=v_ff + v_correction, wz=heading_fix)
 
             if homing and abs(error) <= a.position_tol and abs(self.odom_v) < 0.02:
+                self.get_logger().info(f"landed {error:+.3f}m along, {lateral:+.3f}m lateral off")
                 self.send(0.0, 0.0, 0.0)
                 self.current_cmd = None
             elif elapsed >= T + a.homing_timeout:
