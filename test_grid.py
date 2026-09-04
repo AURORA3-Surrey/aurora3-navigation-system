@@ -2,6 +2,7 @@ import argparse
 import math
 import time
 import rclpy
+from collections import deque
 from rclpy.node import Node
 from geometry_msgs.msg import TwistStamped
 from nav_msgs.msg import Odometry
@@ -9,6 +10,11 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_srvs.srv import SetBool, Trigger
 
 PEAK_FACTOR = 35.0 / 16.0  # velocity_factor at peak (tau=0.5)
+HEADING_GAIN = 1.8         # yaw P-gain for heading hold
+LATERAL_GAIN = 2.0         # lateral offset to yaw error conversion
+LATERAL_CLAMP = 0.35       # max lateral error [m]
+HEADING_FIX_LIMIT = 0.5    # heading_fix clamp as fraction of turn_speed
+
 
 def yaw_from_quaternion(q):
     siny = 2.0 * (q.w * q.z + q.x * q.y)
@@ -60,10 +66,10 @@ class GridMotionNode(Node):
         self.x = self.y = self.yaw = 0.0
         self.have_odom = False
         self.home = None
-        self.intended_yaw = None 
+        self.intended_yaw = None
 
         # execution state machine
-        self.plan = []           # queue of command dictionaries
+        self.plan = deque()      # queue of command dictionaries
         self.current_cmd = None  # command being executed
         self.cmd_start_time = 0.0
         self.cmd_start_pose = (0.0, 0.0, 0.0)
@@ -76,15 +82,17 @@ class GridMotionNode(Node):
         self.odom_seq = 0
         self.odom_v = 0.0
         self.odom_wz = 0.0
+        self.last_odom_time = None
+        self.odom_stamp = None
         self.is_finished = False
 
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
         self.pub = self.create_publisher(TwistStamped, args.cmd_vel_topic, qos)
-        self.create_subscription(Odometry, '/odom', self.odom_cb, qos)
+        self.create_subscription(Odometry, args.odom_topic, self.odom_cb, qos)
         self.motor_client = self.create_client(SetBool, args.motor_power_service)
         self.reset_client = self.create_client(Trigger, args.reset_odom_service)
         self.timer_period = 1.0 / self.a.rate
-        self.control_timer = None 
+        self.control_timer = None
 
     def get_time_sec(self):
         return self.get_clock().now().nanoseconds / 1e9
@@ -96,6 +104,8 @@ class GridMotionNode(Node):
         self.odom_v = math.hypot(msg.twist.twist.linear.x, msg.twist.twist.linear.y)
         self.odom_wz = msg.twist.twist.angular.z
         self.have_odom = True
+        self.last_odom_time = self.get_time_sec()
+        self.odom_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         self.odom_seq += 1
 
     def pose(self):
@@ -104,7 +114,7 @@ class GridMotionNode(Node):
     def send(self, vx=0.0, vy=0.0, wz=0.0):
         now = self.get_time_sec()
         dt = (now - self.last_send_time) if self.last_send_time else self.timer_period
-        self.last_send_time = now        
+        self.last_send_time = now
         max_dv = self.a.max_accel * dt
         max_dw = self.a.max_ang_accel * dt
         vx = clamp(vx, self.last_vx - max_dv, self.last_vx + max_dv)
@@ -126,19 +136,21 @@ class GridMotionNode(Node):
     def tracking_correction(self, axis, error, gain, damping_gain, max_speed, tol):
         now = self.get_time_sec()
         seq = self.odom_seq
+        # D-term time base: odom message stamps (fallback: node time, e.g. zero-stamp drivers)
+        stamp = self.odom_stamp if self.odom_stamp is not None else now
         prev = self.corr_state.get(axis)
         d_error = 0.0
 
         if prev is None:
-            self.corr_state[axis] = (error, now, seq)
+            self.corr_state[axis] = (error, stamp, now, seq)
         else:
-            prev_error, prev_time, prev_seq = prev
+            prev_error, prev_stamp, prev_now, prev_seq = prev
             if seq != prev_seq:
-                dt = now - prev_time
+                dt = stamp - prev_stamp if stamp > prev_stamp else now - prev_now
                 if dt > 1e-6:
                     d_error = (error - prev_error) / dt
                     d_error = clamp(d_error, -self.a.corr_max_d_error, self.a.corr_max_d_error)
-                self.corr_state[axis] = (error, now, seq)
+                self.corr_state[axis] = (error, stamp, now, seq)
 
         if abs(error) <= tol:
             raw_target = 0.0
@@ -227,16 +239,29 @@ class GridMotionNode(Node):
         if self.is_finished:
             return
 
+        now = self.get_time_sec()
+
+        # odometry staleness watchdog
+        if self.last_odom_time is not None and now - self.last_odom_time > self.a.odom_timeout:
+            self.get_logger().error(f'odometry stale for {now - self.last_odom_time:.1f}s, aborting')
+            self.send(0.0, 0.0, 0.0)
+            self.is_finished = True
+            return
+
         # if no current command pull next one from plan
         if self.current_cmd is None:
             if not self.plan:
+                fx, fy, fyaw = self.pose()
+                self.get_logger().info(
+                    f'FINAL: dx={fx - self.home[0]:+.3f}m dy={fy - self.home[1]:+.3f}m '
+                    f'dyaw={math.degrees(normalize(fyaw - self.home[2])):+.2f} deg')
                 self.get_logger().info('Plan complete.')
-                self.send(0.0, 0.0, 0.0) # stop
+                self.send(0.0, 0.0, 0.0)
                 self.is_finished = True
                 return
-            
-            self.current_cmd = self.plan.pop(0)
-            self.cmd_start_time = self.get_time_sec()
+
+            self.current_cmd = self.plan.popleft()
+            self.cmd_start_time = now
             self.cmd_start_pose = self.pose()
             self.reset_correction()
             self.get_logger().info(f"Executing: {self.current_cmd['type']}")
@@ -244,7 +269,6 @@ class GridMotionNode(Node):
         # execute current command
         cmd = self.current_cmd
         ctype = cmd['type']
-        now = self.get_time_sec()
         elapsed = now - self.cmd_start_time
         x, y, yaw = self.pose()
         start_x, start_y, start_yaw = self.cmd_start_pose
@@ -320,8 +344,10 @@ class GridMotionNode(Node):
 
             v_correction = self.tracking_correction('drive', error, a.corr_gain, a.corr_damping_gain,
                                                     a.max_speed, a.position_tol)
-            heading_fix = clamp(1.8 * normalize(start_yaw - yaw - clamp(2.0 * lateral, -0.35, 0.35)),
-                                -0.5 * a.turn_speed, 0.5 * a.turn_speed)
+            heading_fix = clamp(
+                HEADING_GAIN * normalize(start_yaw - yaw
+                                         - clamp(LATERAL_GAIN * lateral, -LATERAL_CLAMP, LATERAL_CLAMP)),
+                -HEADING_FIX_LIMIT * a.turn_speed, HEADING_FIX_LIMIT * a.turn_speed)
             self.send(vx=v_ff + v_correction, wz=heading_fix)
 
             if homing and abs(error) <= a.position_tol and abs(self.odom_v) < 0.02:
@@ -343,20 +369,21 @@ class GridMotionNode(Node):
             tau = min(elapsed / T, 1.0)
             vf = 0.0 if homing else velocity_factor(tau)
             pf = position_factor(tau)
-            
+
             expected_x, expected_y = start_x + dx * pf, start_y + dy * pf
             err_x, err_y = expected_x - x, expected_y - y
-            
+
             vx_corr = self.tracking_correction('move_x', err_x, a.corr_gain, a.corr_damping_gain,
                                                a.max_speed, a.position_tol)
             vy_corr = self.tracking_correction('move_y', err_y, a.corr_gain, a.corr_damping_gain,
                                                a.max_speed, a.position_tol)
-            
+
             vx_world = (dx / T) * vf + vx_corr
             vy_world = (dy / T) * vf + vy_corr
             vx_body, vy_body = world_to_body(vx_world, vy_world, yaw)
-            heading_fix = clamp(1.8 * normalize(start_yaw - yaw), -0.5 * a.turn_speed, 0.5 * a.turn_speed)
-            
+            heading_fix = clamp(HEADING_GAIN * normalize(start_yaw - yaw),
+                                -HEADING_FIX_LIMIT * a.turn_speed, HEADING_FIX_LIMIT * a.turn_speed)
+
             self.send(vx=vx_body, vy=vy_body, wz=heading_fix)
 
             if homing and math.hypot(err_x, err_y) <= a.position_tol and abs(self.odom_v) < 0.02:
@@ -365,20 +392,22 @@ class GridMotionNode(Node):
             elif elapsed >= T + a.homing_timeout:
                 self.get_logger().warn(f'move_to residual {math.hypot(err_x, err_y):.3f}m at timeout')
                 self.current_cmd = None
-                
+
         elif ctype == 'return_home_diff':
             hx, hy, hyaw = self.home
             dist = math.hypot(hx - x, hy - y)
             retries = cmd.get('retries', 0)
             if dist > a.return_position_tol and retries < a.return_home_max_retries:
                 target_angle = math.atan2(hy - y, hx - x)
-                self.plan.insert(0, {'type': 'return_home_diff', 'retries': retries + 1})
-                self.plan.insert(0, {'type': 'drive', 'distance': dist})
-                self.plan.insert(0, {'type': 'turn', 'target_yaw': target_angle})
+                self.plan.extendleft([
+                    {'type': 'return_home_diff', 'retries': retries + 1},
+                    {'type': 'drive', 'distance': dist},
+                    {'type': 'turn', 'target_yaw': target_angle},
+                ])
             else:
                 if dist > a.return_position_tol:
                     self.get_logger().warn(f'return_home_diff: giving up after {retries} attempts, residual distance {dist:.3f}m')
-                self.plan.insert(0, {'type': 'turn', 'target_yaw': hyaw})
+                self.plan.appendleft({'type': 'turn', 'target_yaw': hyaw})
             self.current_cmd = None
 
 
@@ -387,32 +416,39 @@ class GridMotionNode(Node):
 def initialize_robot(node):
     # wait odometry
     node.get_logger().info('waiting for /odom')
-    while rclpy.ok() and not node.have_odom:
+    deadline = node.get_time_sec() + 10.0
+    while rclpy.ok() and not node.have_odom and node.get_time_sec() < deadline:
         rclpy.spin_once(node, timeout_sec=0.1)
-    
+    if not node.have_odom:
+        raise RuntimeError('no /odom received within 10s')
+
     # motor power service
     if node.motor_client.wait_for_service(timeout_sec=3.0):
         future = node.motor_client.call_async(SetBool.Request(data=True))
-        rclpy.spin_until_future_complete(node, future)
+        rclpy.spin_until_future_complete(node, future, timeout_sec=5.0)
+        if not (future.done() and future.result() is not None and future.result().success):
+            node.get_logger().warn('motor power enable failed or timed out')
     else:
         node.get_logger().warn('motor power service not found')
 
     # reset odom service
     if node.reset_client.wait_for_service(timeout_sec=2.0):
         future = node.reset_client.call_async(Trigger.Request())
-        rclpy.spin_until_future_complete(node, future)
-
-        deadline = node.get_time_sec() + 2.0
-        settled = False
-        while rclpy.ok() and node.get_time_sec() < deadline:
-            rclpy.spin_once(node, timeout_sec=0.05)
-            if math.hypot(node.x, node.y) < 0.01 and abs(node.yaw) < 0.02:
-                settled = True
-                break
-        if not settled:
-            node.get_logger().warn(
-                f'odometry not zero after reset: ({node.x:.3f}, {node.y:.3f}, '
-                f'{math.degrees(node.yaw):+.2f} deg) — home may be wrong')
+        rclpy.spin_until_future_complete(node, future, timeout_sec=5.0)
+        if future.done() and future.result() is not None and future.result().success:
+            deadline = node.get_time_sec() + 2.0
+            settled = False
+            while rclpy.ok() and node.get_time_sec() < deadline:
+                rclpy.spin_once(node, timeout_sec=0.05)
+                if math.hypot(node.x, node.y) < 0.01 and abs(node.yaw) < 0.02:
+                    settled = True
+                    break
+            if not settled:
+                node.get_logger().warn(
+                    f'odometry not zero after reset: ({node.x:.3f}, {node.y:.3f}, '
+                    f'{math.degrees(node.yaw):+.2f} deg)')
+        else:
+            node.get_logger().warn('reset odometry failed or timed out')
     else:
         node.get_logger().warn('reset odom service not found')
 
@@ -420,9 +456,6 @@ def initialize_robot(node):
     node.intended_yaw = node.home[2]
     node.get_logger().info(f'home: x={node.home[0]:.3f} y={node.home[1]:.3f} '
                            f'yaw={math.degrees(node.home[2]):+.2f} deg')
-    
-    node.home = node.pose()
-    node.intended_yaw = node.home[2]
 
 
 def parse_args():
@@ -445,6 +478,8 @@ def parse_args():
     p.add_argument('--max-ang-accel', type=float, default=0.5)
     p.add_argument('--no-return-home', action='store_true')
     p.add_argument('--cmd-vel-topic', default='/cmd_vel')
+    p.add_argument('--odom-topic', default='/odom')
+    p.add_argument('--odom-timeout', type=float, default=0.5)
     p.add_argument('--motor-power-service', default='/motor_power')
     p.add_argument('--reset-odom-service', default='/reset_odometry')
     p.add_argument('--corr-max-d-error', type=float, default=1.0)
@@ -457,7 +492,7 @@ def main():
     node = GridMotionNode(args)
     try:
         initialize_robot(node)
-        node.start_control_loop()        
+        node.start_control_loop()
         while rclpy.ok() and not node.is_finished:
             rclpy.spin_once(node, timeout_sec=0.1)
 
@@ -470,14 +505,15 @@ def main():
         # emergency stop
         node.last_vx = node.last_vy = node.last_wz = 0.0
         for _ in range(10):
-            node.send(0.0, 0.0, 0.0)
             try:
+                node.send(0.0, 0.0, 0.0)
                 rclpy.spin_once(node, timeout_sec=0.02)
             except Exception:
                 break
             time.sleep(0.02)
-        node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            node.destroy_node()
+            rclpy.shutdown()
 
 
 
