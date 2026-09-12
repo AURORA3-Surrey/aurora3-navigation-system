@@ -478,7 +478,7 @@ def parse_args():
     p.add_argument('--cmd-vel-topic', default='/cmd_vel')
     p.add_argument('--vicon-topic', default='/vicon/aurora3_robot/aurora3_robot')
     p.add_argument('--vicon-timeout', type=float, default=0.5)
-    p.add_argument('--vel-filter-tau', type=float, default=0.05)
+    p.add_argument('--vel-filter-tau', type=float, default=0.08)
     p.add_argument('--motor-power-service', default='/motor_power')
     p.add_argument('--corr-max-d-error', type=float, default=1.0)
     return p.parse_args()

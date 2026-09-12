@@ -80,7 +80,7 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--vicon-topic', default='/vicon/aurora3_robot/aurora3_robot')
     p.add_argument('--odom-topic', default='/vicon/odom')
-    p.add_argument('--vel-filter-tau', type=float, default=0.05)
+    p.add_argument('--vel-filter-tau', type=float, default=0.08)
     p.add_argument('--yaw-offset-deg', type=float, default=0.0)
     p.add_argument('--scale', type=float, default=1.0)
     return p.parse_args()
