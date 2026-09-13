@@ -99,7 +99,7 @@ class GridMotionNode(Node):
     def vicon_cb(self, msg):
         x = msg.pose.position.x
         y = msg.pose.position.y
-        yaw = yaw_from_quaternion(msg.pose.orientation)
+        yaw = normalize(yaw_from_quaternion(msg.pose.orientation) + math.radians(self.a.vicon_yaw_offset_deg))
         stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         # velocity from filtered finite differences of consecutive vicon samples
         prev = self.vicon_prev
@@ -481,6 +481,7 @@ def parse_args():
     p.add_argument('--vel-filter-tau', type=float, default=0.08)
     p.add_argument('--motor-power-service', default='/motor_power')
     p.add_argument('--corr-max-d-error', type=float, default=1.0)
+    p.add_argument('--vicon-yaw-offset-deg', type=float, default=0.0)
     return p.parse_args()
 
 
