@@ -75,6 +75,7 @@ class ViconCheck(Node):
         return sum(values) / len(values), max(values)
 
     def report(self):
+        
         a = self.a
         print('\nvicon connectivity')
         print(f'topic: {a.vicon_topic}')
@@ -84,6 +85,13 @@ class ViconCheck(Node):
         if self.count == 0:
             print('\nFAIL: no messages received')
             return False
+
+        if self.first_recv is not None and self.last_recv is not None:
+            elapsed = self.last_recv - self.first_recv
+            avg_rate = self.msg_count / elapsed if elapsed > 0 else float('nan')
+        else:
+            elapsed = 0.0
+            avg_rate = float('nan')
 
         elapsed = self.last_recv - self.first_recv
         rate = (self.count - 1) / elapsed if elapsed > 0 else 0.0
@@ -146,7 +154,7 @@ class ViconCheck(Node):
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--vicon-topic', default='/vicon/aurora3_robot/aurora3_robot')
+    p.add_argument('--vicon-topic', default='/vicon/Turtlebot3/Turtlebot3')
     p.add_argument('--duration', type=float, default=10.0) # seconds of test window
     p.add_argument('--min-rate', type=float, default=10.0) # mium accepted mess rate [Hz]
     p.add_argument('--expect-motion', action='store_true') # fails unless the pose moves over 50mm during window
