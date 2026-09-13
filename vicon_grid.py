@@ -476,7 +476,7 @@ def parse_args():
     p.add_argument('--max-ang-accel', type=float, default=0.5)
     p.add_argument('--no-return-home', action='store_true')
     p.add_argument('--cmd-vel-topic', default='/cmd_vel')
-    p.add_argument('--vicon-topic', default='/vicon/aurora3_robot/aurora3_robot')
+    p.add_argument('--vicon-topic', default='/vicon/Turtlebot3/Turtlebot3')
     p.add_argument('--vicon-timeout', type=float, default=0.5)
     p.add_argument('--vel-filter-tau', type=float, default=0.08)
     p.add_argument('--motor-power-service', default='/motor_power')
