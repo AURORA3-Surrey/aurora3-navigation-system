@@ -87,13 +87,6 @@ class ViconCheck(Node):
             print('\nFAIL: no messages received')
             return False
 
-        if self.first_recv is not None and self.last_recv is not None:
-            elapsed = self.last_recv - self.first_recv
-            avg_rate = self.msg_count / elapsed if elapsed > 0 else float('nan')
-        else:
-            elapsed = 0.0
-            avg_rate = float('nan')
-
         elapsed = (self.last_recv - self.first_recv) if (self.last_recv is not None and self.first_recv is not None) else 0.0
         rate = (self.count - 1) / elapsed if elapsed > 0 else 0.0
         lag_mean, lag_max = self.stats(self.lags)
