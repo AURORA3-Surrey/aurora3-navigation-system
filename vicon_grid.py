@@ -4,7 +4,7 @@ import time
 import rclpy
 from collections import deque
 from rclpy.node import Node
-from geometry_msgs.msg import Twist, PoseStamped
+from geometry_msgs.msg import TwistStamped, PoseStamped
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from std_srvs.srv import SetBool
 
@@ -87,7 +87,7 @@ class GridMotionNode(Node):
         self.is_finished = False
 
         qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, history=HistoryPolicy.KEEP_LAST, depth=10)
-        self.pub = self.create_publisher(Twist, args.cmd_vel_topic, qos)
+        self.pub = self.create_publisher(TwistStamped, args.cmd_vel_topic, qos)
         self.create_subscription(PoseStamped, args.vicon_topic, self.vicon_cb, qos)
         self.motor_client = self.create_client(SetBool, args.motor_power_service)
         self.timer_period = 1.0 / self.a.rate
@@ -136,10 +136,11 @@ class GridMotionNode(Node):
         wz = clamp(wz, self.last_wz - max_dw, self.last_wz + max_dw)
         self.last_vx, self.last_vy, self.last_wz = vx, vy, wz
 
-        msg = Twist()
-        msg.linear.x = float(vx)
-        msg.linear.y = float(vy)
-        msg.angular.z = float(wz)
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.twist.linear.x = float(vx)
+        msg.twist.linear.y = float(vy)
+        msg.twist.angular.z = float(wz)
         self.pub.publish(msg)
 
     def reset_correction(self):
