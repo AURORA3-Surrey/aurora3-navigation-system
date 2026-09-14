@@ -3,6 +3,7 @@ import json
 import math
 import os
 import signal
+import sys
 import time
 import rclpy
 from collections import deque
@@ -40,12 +41,28 @@ def load_yaw_offset_file(path):
     try:
         with open(path, 'r') as f:
             data = json.load(f)
+        created = str(data.get('created', ''))[:10] or 'unknown'
         off = float(data['offset_deg'])
         if not -360.0 <= off <= 360.0:
-            return None
-        return off
+            return None, created
+        return off, created
     except Exception:
-        return None
+        return None, 'unknown'
+
+
+def yaw_offset_error(args):
+    if (args.vicon_yaw_offset_deg is not None or args.no_yaw_offset_file
+            or args.allow_stale_yaw_offset):
+        return ''
+    if not os.path.isfile(args.yaw_offset_file):
+        return f'no yaw-offset calibration file ({args.yaw_offset_file})'
+    loaded, created = load_yaw_offset_file(args.yaw_offset_file)
+    if loaded is None:
+        return f'unreadable yaw-offset calibration file ({args.yaw_offset_file})'
+    today = time.strftime('%Y-%m-%d')
+    if created != today:
+        return f'yaw-offset calibration dated {created} (today: {today})'
+    return ''
 
 
 def world_to_body(vx_world, vy_world, yaw):
@@ -83,13 +100,13 @@ class GridMotionNode(Node):
             args.vicon_yaw_offset_deg = 0.0
             src = 'default 0 (--no-yaw-offset-file)'
         elif os.path.isfile(args.yaw_offset_file):
-            loaded = load_yaw_offset_file(args.yaw_offset_file)
+            loaded, created = load_yaw_offset_file(args.yaw_offset_file)
             if loaded is None:
                 args.vicon_yaw_offset_deg = 0.0
                 src = f'default 0 (unreadable calibration file: {args.yaw_offset_file})'
             else:
                 args.vicon_yaw_offset_deg = loaded
-                src = f'calibration file: {args.yaw_offset_file}'
+                src = f'calibration file: {args.yaw_offset_file} (dated {created})'
         else:
             args.vicon_yaw_offset_deg = 0.0
             src = 'default 0 (no calibration file run vicon_yaw_calibration.py once)'
@@ -544,11 +561,20 @@ def parse_args():
     p.add_argument('--vicon-yaw-offset-deg', type=float, default=None)
     p.add_argument('--yaw-offset-file', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vicon_yaw_offset.json'))
     p.add_argument('--no-yaw-offset-file', action='store_true')
+    p.add_argument('--allow-stale-yaw-offset', action='store_true')
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+    gate = yaw_offset_error(args)
+    if gate:
+        print(f'ABORT: {gate}')
+        print('the yaw offset must be calibrated the SAME DAY before any run')
+        print('fix: python3 vicon_yaw_calibration.py then re-run this script')
+        print('(bypass: --allow-stale-yaw-offset')
+        print('--vicon-yaw-offset-deg, or --no-yaw-offset-file)')
+        sys.exit(1)
     rclpy.init()
     node = GridMotionNode(args)
 
