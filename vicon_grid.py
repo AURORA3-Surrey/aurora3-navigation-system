@@ -208,30 +208,32 @@ class GridMotionNode(Node):
 
     def generate_grid_plan(self):
         self.plan.clear()
-        n = self.a.grid_size
-        cell = self.a.cell_size
-        self.get_logger().info(f'Generating {n}x{n} grid plan ({self.a.platform})...')
+        rows = self.a.grid_size
+        cols = self.a.grid_cols if self.a.grid_cols is not None else self.a.grid_size
+        csx = self.a.cell_size_x if self.a.cell_size_x is not None else self.a.cell_size
+        csy = self.a.cell_size_y if self.a.cell_size_y is not None else self.a.cell_size
+        self.get_logger().info(f'Generating {rows} rows x {cols} cols grid plan ({self.a.platform})...')
 
         self.plan_wait(0.3)
 
         if self.a.platform == 'omni':
             hx, hy, _ = self.home
             waypoints = []
-            for row in range(n):
-                wy = hy + row * cell
-                cols = range(n) if row % 2 == 0 else reversed(range(n))
-                for col in cols:
-                    waypoints.append((hx + col * cell, wy))
+            for row in range(rows):
+                wy = hy + row * csy
+                col_order = range(cols) if row % 2 == 0 else reversed(range(cols))
+                for col in col_order:
+                    waypoints.append((hx + col * csx, wy))
             for wx, wy in waypoints[1:]:
                 self.plan_move_to(wx, wy)
         else:
-            for row in range(n):
-                for _ in range(n - 1):
-                    self.plan_drive(cell)
-                if row < n - 1:
+            for row in range(rows):
+                for _ in range(cols - 1):
+                    self.plan_drive(csx)
+                if row < rows - 1:
                     turn = -math.pi / 2 if row % 2 == 0 else math.pi / 2
                     self.plan_turn_by(turn)
-                    self.plan_drive(cell)
+                    self.plan_drive(csy)
                     self.plan_turn_by(turn)
 
         if not self.a.no_return_home:
@@ -483,8 +485,11 @@ def initialize_robot(node):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--platform', choices=['diff', 'omni'], default='diff')
-    p.add_argument('--grid-size', type=int, default=4)
+    p.add_argument('--grid-size', type=int, default=4) # rows (height points) width set by --grid-cols
+    p.add_argument('--grid-cols', type=int, default=None) # columns (width points) default = --grid-size (square)
     p.add_argument('--cell-size', type=float, default=0.25)
+    p.add_argument('--cell-size-x', type=float, default=None)
+    p.add_argument('--cell-size-y', type=float, default=None)
     p.add_argument('--max-speed', type=float, default=0.1)
     p.add_argument('--turn-speed', type=float, default=0.25)
     p.add_argument('--corr-gain', type=float, default=1.5)
