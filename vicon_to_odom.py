@@ -1,5 +1,7 @@
 import argparse
+import json
 import math
+import os
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import TwistStamped, PoseStamped
@@ -21,11 +23,40 @@ def normalize(angle):
     return angle
 
 
+def load_yaw_offset_file(path):
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+        off = float(data['offset_deg'])
+        if not -360.0 <= off <= 360.0:
+            return None
+        return off
+    except Exception:
+        return None
+
+
 class ViconToOdom(Node):
     # bridges geometry_msgs/PoseStamped (vicon) -> nav_msgs/Odometry
     def __init__(self, args):
         super().__init__('vicon_to_odom')
         self.a = args
+        if args.yaw_offset_deg is not None:
+            src = 'command line'
+        elif args.no_yaw_offset_file:
+            args.yaw_offset_deg = 0.0
+            src = 'default 0 (--no-yaw-offset-file)'
+        elif os.path.isfile(args.yaw_offset_file):
+            loaded = load_yaw_offset_file(args.yaw_offset_file)
+            if loaded is None:
+                args.yaw_offset_deg = 0.0
+                src = f'default 0 (unreadable calibration file: {args.yaw_offset_file})'
+            else:
+                args.yaw_offset_deg = loaded
+                src = f'calibration file: {args.yaw_offset_file}'
+        else:
+            args.yaw_offset_deg = 0.0
+            src = 'default 0 (no calibration file run vicon_yaw_calibration.py once)'
+        self.get_logger().info(f'vicon yaw offset: {args.yaw_offset_deg:+.1f} deg ({src})')
         self.prev = None   # (x, y, yaw, stamp) of previous vicon sample
         self.v = 0.0
         self.wz = 0.0
@@ -81,7 +112,9 @@ def parse_args():
     p.add_argument('--vicon-topic', default='/vicon/Turtlebot3/Turtlebot3')
     p.add_argument('--odom-topic', default='/vicon/odom')
     p.add_argument('--vel-filter-tau', type=float, default=0.08)
-    p.add_argument('--yaw-offset-deg', type=float, default=0.0)
+    p.add_argument('--yaw-offset-deg', type=float, default=None)
+    p.add_argument('--yaw-offset-file', default=os.path.join(os.path.dirname(os.path.abspath(__file__)),'vicon_yaw_offset.json'))
+    p.add_argument('--no-yaw-offset-file', action='store_true')
     p.add_argument('--scale', type=float, default=1.0)
     return p.parse_args()
 

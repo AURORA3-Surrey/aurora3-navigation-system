@@ -1,5 +1,7 @@
 import argparse
+import json
 import math
+import os
 import signal
 import time
 import rclpy
@@ -34,6 +36,18 @@ def clamp(v, low, high):
     return max(low, min(high, v))
 
 
+def load_yaw_offset_file(path):
+    try:
+        with open(path, 'r') as f:
+            data = json.load(f)
+        off = float(data['offset_deg'])
+        if not -360.0 <= off <= 360.0:
+            return None
+        return off
+    except Exception:
+        return None
+
+
 def world_to_body(vx_world, vy_world, yaw):
     # rotate world velocity into robot body frame (omni only)
     c, s = math.cos(yaw), math.sin(yaw)
@@ -63,6 +77,23 @@ class GridMotionNode(Node):
     def __init__(self, args):
         super().__init__('grid_motion_vicon_node')
         self.a = args
+        if args.vicon_yaw_offset_deg is not None:
+            src = 'command line'
+        elif args.no_yaw_offset_file:
+            args.vicon_yaw_offset_deg = 0.0
+            src = 'default 0 (--no-yaw-offset-file)'
+        elif os.path.isfile(args.yaw_offset_file):
+            loaded = load_yaw_offset_file(args.yaw_offset_file)
+            if loaded is None:
+                args.vicon_yaw_offset_deg = 0.0
+                src = f'default 0 (unreadable calibration file: {args.yaw_offset_file})'
+            else:
+                args.vicon_yaw_offset_deg = loaded
+                src = f'calibration file: {args.yaw_offset_file}'
+        else:
+            args.vicon_yaw_offset_deg = 0.0
+            src = 'default 0 (no calibration file run vicon_yaw_calibration.py once)'
+        self.get_logger().info(f'vicon yaw offset: {args.vicon_yaw_offset_deg:+.1f} deg ({src})')
         self.x = self.y = self.yaw = 0.0
         self.have_pose = False
         self.home = None
@@ -510,7 +541,9 @@ def parse_args():
     p.add_argument('--vel-filter-tau', type=float, default=0.08)
     p.add_argument('--motor-power-service', default='/motor_power')
     p.add_argument('--corr-max-d-error', type=float, default=1.0)
-    p.add_argument('--vicon-yaw-offset-deg', type=float, default=0.0)
+    p.add_argument('--vicon-yaw-offset-deg', type=float, default=None)
+    p.add_argument('--yaw-offset-file', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'vicon_yaw_offset.json'))
+    p.add_argument('--no-yaw-offset-file', action='store_true')
     return p.parse_args()
 
 
