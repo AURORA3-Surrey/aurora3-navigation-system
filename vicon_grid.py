@@ -268,7 +268,8 @@ class GridMotionNode(Node):
             if not self.plan:
                 fx, fy, fyaw = self.pose()
                 self.get_logger().info(
-                    f'FINAL: dx={fx - self.home[0]:+.3f}m dy={fy - self.home[1]:+.3f}m '
+                    f'FINAL: at ({fx:+.3f}, {fy:+.3f}) yaw {math.degrees(fyaw):+.1f} deg | '
+                    f'dx={fx - self.home[0]:+.3f}m dy={fy - self.home[1]:+.3f}m '
                     f'dyaw={math.degrees(normalize(fyaw - self.home[2])):+.2f} deg')
                 self.get_logger().info('Plan complete.')
                 self.send(0.0, 0.0, 0.0)
@@ -305,7 +306,9 @@ class GridMotionNode(Node):
 
             if not cmd.get('logged'):
                 cmd['logged'] = True
-                self.get_logger().info(f"turn cmd {math.degrees(angle):+.1f} deg (start yaw {math.degrees(start_yaw):+.1f})")
+                self.get_logger().info(
+                    f"turn cmd {math.degrees(angle):+.1f} deg (start yaw {math.degrees(start_yaw):+.1f}) "
+                    f"-> target vicon yaw {math.degrees(normalize(cmd['target_yaw'])):+.1f} deg")
 
             T = duration_for_peak(angle, a.turn_speed)
             if T <= 0:
@@ -347,7 +350,11 @@ class GridMotionNode(Node):
 
             if not cmd.get('logged'):
                 cmd['logged'] = True
-                self.get_logger().info(f"drive cmd {dist:+.3f}m (start yaw {math.degrees(start_yaw):+.1f})")
+                tgt_x = start_x + dist * math.cos(start_yaw)
+                tgt_y = start_y + dist * math.sin(start_yaw)
+                self.get_logger().info(
+                    f"drive cmd {dist:+.3f}m (start yaw {math.degrees(start_yaw):+.1f}) "
+                    f"vicon ({start_x:+.3f}, {start_y:+.3f}) -> ({tgt_x:+.3f}, {tgt_y:+.3f})")
 
             homing = elapsed >= T
             tau = min(elapsed / T, 1.0)
@@ -378,6 +385,11 @@ class GridMotionNode(Node):
                 self.current_cmd = None
 
         elif ctype == 'move_to':
+            if not cmd.get('logged'):
+                cmd['logged'] = True
+                self.get_logger().info(
+                    f"move_to vicon ({start_x:+.3f}, {start_y:+.3f}) -> "
+                    f"({cmd['target_x']:+.3f}, {cmd['target_y']:+.3f})")
             dx = cmd['target_x'] - start_x
             dy = cmd['target_y'] - start_y
             T = max(duration_for_peak(dx, a.max_speed), duration_for_peak(dy, a.max_speed))
@@ -421,11 +433,16 @@ class GridMotionNode(Node):
                 if not cmd.get('aimed'):
                     # turn to the current bearing to home then re-evaluate
                     target_angle = math.atan2(hy - y, hx - x)
+                    self.get_logger().info(
+                        f"return home: vicon ({x:+.3f}, {y:+.3f}) -> home ({hx:+.3f}, {hy:+.3f}) "
+                        f"dist {dist:.3f}m bearing {math.degrees(target_angle):+.1f} deg")
                     cmd['aimed'] = True
                     self.plan.appendleft(cmd)  # re-queued
                     self.plan.appendleft({'type': 'turn', 'target_yaw': target_angle})
                 else:
-                    # phase 2: distance measured after the turn
+                    # distance measured after the turn
+                    self.get_logger().info(
+                        f"return home attempt {retries + 1}: drive {dist:.3f}m toward home ({hx:+.3f}, {hy:+.3f})")
                     cmd['aimed'] = False
                     cmd['retries'] = retries + 1
                     self.plan.appendleft(cmd)
