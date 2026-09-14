@@ -4,7 +4,7 @@
 # 3x3 grid on the 3.0 x 0.8 m tape rectangle (start the robot on a corner of the tape with 3m side on its right)
 # to change topic --vicon-topic /vicon/Other/Name
 # change pause length with LOOP_SLEEP_SECS=10 ./run_grid_loop.sh
-# for faster laps do ./run_grid_loop.sh --max-speed >0.1
+# for faster laps do ./run_grid_loop.sh --max-speed >0.25
 # ctrl-C stops the whole loop
 
 set -u
@@ -69,7 +69,7 @@ while true; do
     echo " GRID LOOP - run #${run_count}   (ctrl-C quits | if bad bad: emergencystop.py)"
     echo "=================================================================="
     # DEMO taped rectangle: 3 rows x 3 cols, 1.5 m along heading x 0.4 m to the right
-    python3 vicon_grid.py --grid-size 3 --grid-cols 3 --cell-size-x 1.5 --cell-size-y 0.4 --max-speed 0.2 --turn-speed 0.2 "$@" &
+    python3 vicon_grid.py --grid-size 3 --grid-cols 3 --cell-size-x 1.5 --cell-size-y 0.4 --max-speed 0.25 --turn-speed 0.2 "$@" &
     NODE_PID=$!
     wait "$NODE_PID"
     status=$?
