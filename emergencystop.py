@@ -33,15 +33,23 @@ def main():
     p.add_argument('--keep-motors-on', action='store_true')
     args = p.parse_args()
 
-    rclpy.init()
+    try:
+        from rclpy.signals import SignalHandlerOptions
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    except (ImportError, TypeError):
+        rclpy.init()
     node = Stop(args)
     sent = 0
     try:
-        for _ in range(args.bursts):
-            node.send_zero()
-            sent += 1
-            rclpy.spin_once(node, timeout_sec=0.02)
-            time.sleep(0.02)
+        try:
+            for _ in range(args.bursts):
+                node.send_zero()
+                sent += 1
+                rclpy.spin_once(node, timeout_sec=0.02)
+                time.sleep(0.02)
+        except KeyboardInterrupt:
+            node.get_logger().warn(
+                f'stop: interrupted after {sent}/{args.bursts} zeros, cutting motor power')
         node.get_logger().info(f'stop: {sent}/{args.bursts} zero commands published on {args.cmd_vel_topic}')
 
         if args.keep_motors_on:
@@ -55,6 +63,8 @@ def main():
                 node.get_logger().warn('stop: motor power off failed')
         else:
             node.get_logger().warn('stop: /motor_power service not found')
+    except KeyboardInterrupt:
+        node.get_logger().warn('stop: interrupted, motor power state unconfirmed')
     finally:
         if rclpy.ok():
             node.destroy_node()

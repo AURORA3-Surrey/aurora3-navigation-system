@@ -575,13 +575,18 @@ def main():
         print('(bypass: --allow-stale-yaw-offset')
         print('--vicon-yaw-offset-deg, or --no-yaw-offset-file)')
         sys.exit(1)
-    rclpy.init()
+    try:
+        from rclpy.signals import SignalHandlerOptions
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    except (ImportError, TypeError):
+        rclpy.init()
     node = GridMotionNode(args)
 
-    def stop_on_sigterm(signum, frame):
+    def stop_on_signal(signum, frame):
         raise KeyboardInterrupt
 
-    signal.signal(signal.SIGTERM, stop_on_sigterm)
+    signal.signal(signal.SIGINT, stop_on_signal)
+    signal.signal(signal.SIGTERM, stop_on_signal)
 
     try:
         initialize_robot(node)

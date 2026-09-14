@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import signal
 import sys
 import time
 import rclpy
@@ -148,8 +149,18 @@ def main():
         print('(bypass: --allow-stale-yaw-offset')
         print('--vicon-yaw-offset-deg, or --no-yaw-offset-file)')
         sys.exit(1)
-    rclpy.init()
+    try:
+        from rclpy.signals import SignalHandlerOptions
+        rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+    except (ImportError, TypeError):
+        rclpy.init()
     node = ViconToOdom(args)
+
+    def stop_on_signal(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, stop_on_signal)
+    signal.signal(signal.SIGTERM, stop_on_signal)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
