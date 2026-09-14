@@ -1,5 +1,6 @@
 import argparse
 import math
+import signal
 import time
 import rclpy
 from collections import deque
@@ -417,12 +418,18 @@ class GridMotionNode(Node):
             dist = math.hypot(hx - x, hy - y)
             retries = cmd.get('retries', 0)
             if dist > a.return_position_tol and retries < a.return_home_max_retries:
-                target_angle = math.atan2(hy - y, hx - x)
-                self.plan.extendleft([
-                    {'type': 'return_home_diff', 'retries': retries + 1},
-                    {'type': 'drive', 'distance': dist},
-                    {'type': 'turn', 'target_yaw': target_angle},
-                ])
+                if not cmd.get('aimed'):
+                    # turn to the current bearing to home then re-evaluate
+                    target_angle = math.atan2(hy - y, hx - x)
+                    cmd['aimed'] = True
+                    self.plan.appendleft(cmd)  # re-queued
+                    self.plan.appendleft({'type': 'turn', 'target_yaw': target_angle})
+                else:
+                    # phase 2: distance measured after the turn
+                    cmd['aimed'] = False
+                    cmd['retries'] = retries + 1
+                    self.plan.appendleft(cmd)
+                    self.plan.appendleft({'type': 'drive', 'distance': dist})
             else:
                 if dist > a.return_position_tol:
                     self.get_logger().warn(f'return_home_diff: giving up after {retries} attempts, residual distance {dist:.3f}m')
@@ -489,6 +496,12 @@ def main():
     args = parse_args()
     rclpy.init()
     node = GridMotionNode(args)
+
+    def stop_on_sigterm(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_sigterm)
+
     try:
         initialize_robot(node)
         node.start_control_loop()
@@ -496,20 +509,24 @@ def main():
             rclpy.spin_once(node, timeout_sec=0.1)
 
     except KeyboardInterrupt:
-        node.get_logger().warn('stopping robot')
+        node.get_logger().warn('stop requested')
     except Exception as exc:
         node.get_logger().error(f'error: {exc}')
         raise
     finally:
-        # emergency stop
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         node.last_vx = node.last_vy = node.last_wz = 0.0
+        sent = 0
         for _ in range(10):
             try:
                 node.send(0.0, 0.0, 0.0)
+                sent += 1
                 rclpy.spin_once(node, timeout_sec=0.02)
+                time.sleep(0.02)
             except Exception:
                 break
-            time.sleep(0.02)
+        node.get_logger().info(f'stop: {sent}/10 zero commands published')
         if rclpy.ok():
             node.destroy_node()
             rclpy.shutdown()

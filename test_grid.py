@@ -1,5 +1,6 @@
 import argparse
 import math
+import signal
 import time
 import rclpy
 from collections import deque
@@ -495,6 +496,12 @@ def main():
     args = parse_args()
     rclpy.init()
     node = GridMotionNode(args)
+
+    def stop_on_sigterm(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_sigterm)
+
     try:
         initialize_robot(node)
         node.start_control_loop()
@@ -508,14 +515,19 @@ def main():
         raise
     finally:
         # emergency stop
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
         node.last_vx = node.last_vy = node.last_wz = 0.0
+        sent = 0
         for _ in range(10):
             try:
                 node.send(0.0, 0.0, 0.0)
+                sent += 1
                 rclpy.spin_once(node, timeout_sec=0.02)
             except Exception:
                 break
             time.sleep(0.02)
+        node.get_logger().info(f'stop: {sent}/10 zero commands published')
         if rclpy.ok():
             node.destroy_node()
             rclpy.shutdown()
