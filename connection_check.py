@@ -56,6 +56,7 @@ class ViconCheck(Node):
         if self.first_recv is None:
             self.first_recv = recv
             self.first_pos = (x, y)
+        self.last_recv = recv
         if self.prev is not None:
             self.recv_dts.append(recv - self.prev[4])
             self.stamp_dts.append(stamp - self.prev[3])
