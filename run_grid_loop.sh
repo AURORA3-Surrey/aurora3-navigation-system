@@ -1,8 +1,10 @@
 #!/bin/bash
 # LOOP FOR 15/09/26 SOFT OPENING VAR DEMO
 # do chmod +x run_grid_loop.sh once and run with ./run_grid_loop.sh
+# 3x3 grid on the 3.0 x 0.8 m tape rectangle (start the robot on a corner of the tape with 3m side on its right)
 # to change topic --vicon-topic /vicon/Other/Name
 # change pause length with LOOP_SLEEP_SECS=10 ./run_grid_loop.sh
+# for faster laps do ./run_grid_loop.sh --max-speed >0.1
 # ctrl-C stops the whole loop
 
 set -u
@@ -66,7 +68,8 @@ while true; do
     echo "=================================================================="
     echo " GRID LOOP - run #${run_count}   (ctrl-C quits | if bad bad: emergencystop.py)"
     echo "=================================================================="
-    python3 vicon_grid.py --grid-size 4 --grid-cols 2 --cell-size 0.25  --max-speed 0.06 --turn-speed 0.2 "$@" &
+    # DEMO taped rectangle: 3 rows x 3 cols, 1.5 m along heading x 0.4 m to the right
+    python3 vicon_grid.py --grid-size 3 --grid-cols 3 --cell-size-x 1.5 --cell-size-y 0.4 --max-speed 0.2 --turn-speed 0.2 "$@" &
     NODE_PID=$!
     wait "$NODE_PID"
     status=$?
@@ -82,4 +85,5 @@ while true; do
     sleep "${SLEEP_SECS}"
 done
 
-echo "last run exited with status ${status:-?}, reposition the robot then ./run_grid_loop.sh."
+echo "last run exited with status ${status:-?}, put the robot back on a tape corner"
+echo "(facing along the 3 m side, tape to its right), then ./run_grid_loop.sh."
