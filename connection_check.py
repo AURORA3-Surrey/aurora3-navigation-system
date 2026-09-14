@@ -67,7 +67,6 @@ class ViconCheck(Node):
         self.last_pos = (x, y)
         self.last_yaw = yaw
         self.prev = (x, y, yaw, stamp, recv)
-        self.last_recv = recv
         self.count += 1
 
     def stats(self, values):
@@ -76,7 +75,6 @@ class ViconCheck(Node):
         return sum(values) / len(values), max(values)
 
     def report(self):
-        
         a = self.a
         print('\nvicon connectivity')
         print(f'topic: {a.vicon_topic}')
@@ -85,9 +83,14 @@ class ViconCheck(Node):
 
         if self.count == 0:
             print('\nFAIL: no messages received')
+            print('hints:')
+            print('check the bridge is running: ros2 node list | grep vicon')
+            print('check the topic exists: ros2 topic list | grep vicon')
+            print('check Tracker: DataStream enabled, rigid body visible')
+            print('if the subject/segment name differs, pass --vicon-topic')
             return False
 
-        elapsed = (self.last_recv - self.first_recv) if (self.last_recv is not None and self.first_recv is not None) else 0.0
+        elapsed = self.last_recv - self.first_recv
         rate = (self.count - 1) / elapsed if elapsed > 0 else 0.0
         lag_mean, lag_max = self.stats(self.lags)
         sdt_mean, sdt_max = self.stats(self.stamp_dts)
