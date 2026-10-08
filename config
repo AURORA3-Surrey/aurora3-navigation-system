@@ -1,0 +1,5 @@
+Host dingo
+    HostName cpr-do150-0092
+    User robot
+    IdentityFile ~/.ssh/id_ed25519_dingo
+    IdentitiesOnly yes
